@@ -1,0 +1,73 @@
+# AURA — build a debug APK entirely in GitHub's cloud.
+#
+# Copy this file to  .github/workflows/build-apk.yml  in your repo (it must sit at
+# that exact path), then push. Every push — or a manual run from the Actions tab —
+# produces a downloadable `aura-debug-apk` artifact. No Android Studio, no SDK on
+# your own machine.
+#
+# The repo layout this expects (i.e. the contents of aura-apk-project.zip):
+#
+#   android/            <- Gradle project (android/app/build.gradle sets assets.srcDirs = ["../../web"])
+#   web/                <- the AURA web app (index.html, app.js, ...)
+#   .github/workflows/build-apk.yml
+#
+# The 112 built-in wallpapers are NOT in the repo (see android/WALLPAPERS.md) — this
+# workflow downloads them below, which keeps the git repo small and the APK ~100 MB.
+
+name: Build APK
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download wallpaper pack
+        run: |
+          set -euo pipefail
+          mkdir -p web/wallpapers
+          cd web
+          curl -fsSL -o /tmp/wp01.zip "https://user.uploads.dev/file/fca8cbb8db7a277a094194aad3e3657e.zip"
+          curl -fsSL -o /tmp/wp02.zip "https://user.uploads.dev/file/8889be41f5f51d8615fa0dc8f75cf64e.zip"
+          curl -fsSL -o /tmp/wp03.zip "https://user.uploads.dev/file/8404381b0c43e9311117aaf01464cced.zip"
+          curl -fsSL -o /tmp/wp04.zip "https://user.uploads.dev/file/c363c819ffde3464818a9212b99da41c.zip"
+          for z in /tmp/wp01.zip /tmp/wp02.zip /tmp/wp03.zip /tmp/wp04.zip; do
+            unzip -oq "$z"
+          done
+          echo "full:  $(find wallpapers/full  -name '*.jpg' | wc -l)"
+          echo "thumb: $(find wallpapers/thumb -name '*.jpg' | wc -l)"
+          test "$(find wallpapers/full -name '*.jpg' | wc -l)"  -eq 112
+          test "$(find wallpapers/thumb -name '*.jpg' | wc -l)" -eq 112
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aura-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
