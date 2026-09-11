@@ -1,0 +1,7 @@
+// AURA — Android WebView shell
+// Top-level Gradle build. Open the `src/android` folder in Android Studio, or run
+// `./gradlew assembleDebug` and install app/build/outputs/apk/debug/app-debug.apk.
+plugins {
+    id "com.android.application" version "8.7.3" apply false
+    id "org.jetbrains.kotlin.android" version "1.9.24" apply false
+}

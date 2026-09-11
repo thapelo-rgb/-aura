@@ -1,0 +1,13 @@
+<resources>
+    <!-- Deliberately based on the platform theme (not AppCompat) so the shell has
+         zero UI dependencies: AURA draws its own chrome, including status bar. -->
+    <style name="Theme.Aura" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/aura_bg</item>
+        <item name="android:colorBackground">@color/aura_bg</item>
+        <item name="android:textColorPrimary">@color/aura_ink</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
