@@ -5,6 +5,8 @@ import android.annotation.SuppressLint
 import android.app.WallpaperManager
 import android.app.role.RoleManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -14,6 +16,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
@@ -30,13 +33,20 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.GeolocationPermissions
 import android.webkit.JavascriptInterface
+import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.PickVisualMediaRequest
@@ -52,6 +62,8 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
@@ -80,6 +92,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var loader: WebViewAssetLoader
     private val io = Executors.newCachedThreadPool()
     private val iconCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    // False until the WebView exists and the real UI is on screen; lifecycle
+    // callbacks and bridge replies check it so the crash screen can't be pushed
+    // over by a half-built shell.
+    private var webReady = false
+
+    private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
 
     // Held while the runtime location prompt is on screen.
     private var pendingGeo: GeolocationPermissions.Callback? = null
@@ -111,6 +130,48 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // If the previous run died, show why instead of closing silently. A phone
+        // gives no other channel, so this screen is the whole diagnosis loop.
+        readCrash()?.let {
+            showDiagnostics(it, includeConsole = true)
+            return
+        }
+
+        // No stack trace, yet the previous foreground run never paused: the whole
+        // process was killed natively (a graphics-driver style death). Say so, and
+        // offer a GPU-off retry.
+        if (sessionFile().exists()) {
+            writeCrashText(
+                "AURA closed without reporting an error.\n\n" +
+                    "The app's process died before it could log a reason. That is almost\n" +
+                    "always the graphics / WebView renderer rather than AURA's own code.\n" +
+                    "Tap \"Safe mode (GPU off)\" to retry with hardware acceleration off."
+            )
+            readCrash()?.let { showDiagnostics(it, includeConsole = true) }
+            return
+        }
+
+        try {
+            setupWeb()
+        } catch (t: Throwable) {
+            writeCrash(t)
+            readCrash()?.let { text -> showDiagnostics(text, includeConsole = true) }
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupWeb() {
+        // Fresh console log for this run — cleared only when we actually start,
+        // so a crash screen keeps the log from the run that crashed.
+        io.execute { runCatching { File(filesDir, CONSOLE_FILE).writeText("") } }
+
+        // "Safe mode" is a one-shot: if the previous launch died without a stack
+        // trace, the crash screen offers to retry with hardware acceleration off,
+        // which sidesteps a bad GPU driver. It never sticks around, so a working
+        // safe-mode launch can't leave AURA permanently degraded.
+        val safeMode = prefs.getBoolean(SAFE_ONCE, false)
+        if (safeMode) prefs.edit().remove(SAFE_ONCE).apply()
+
         // Edge to edge: the app draws under the status/nav bars and receives the
         // insets over the bridge, so its own chrome can sit clear of them.
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -139,6 +200,7 @@ class MainActivity : ComponentActivity() {
             .build()
 
         web = WebView(this)
+        if (safeMode) web.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         web.layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         )
@@ -186,6 +248,32 @@ class MainActivity : ComponentActivity() {
                 super.onPageFinished(view, url)
                 pushInsets()
             }
+
+            override fun onReceivedError(
+                view: WebView, request: WebResourceRequest, error: WebResourceError
+            ) {
+                if (!request.isForMainFrame) return
+                val desc = "${error.errorCode} ${error.description}"
+                writeCrashText("The app's own page failed to load\n\n$desc\nurl: ${request.url}")
+                readCrash()?.let { showDiagnostics(it, includeConsole = true) }
+            }
+
+            override fun onRenderProcessGone(
+                view: WebView, detail: RenderProcessGoneDetail
+            ): Boolean {
+                // The WebView renderer (separate process) died — usually a GPU
+                // driver crash or low memory. Returning true keeps us alive to
+                // say so instead of taking the whole app down with it.
+                val why = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && detail.didCrash())
+                    "the graphics renderer crashed" else "the graphics renderer was killed (low memory)"
+                writeCrashText("AURA's WebView renderer died\n\n$why\ndetail: $detail")
+                readCrash()?.let { showDiagnostics(it, includeConsole = true) }
+                // A renderer-gone WebView is unusable; tear it down rather than leak it.
+                webReady = false
+                runCatching { (view.parent as? ViewGroup)?.removeView(view) }
+                runCatching { view.destroy() }
+                return true
+            }
         }
 
         web.webChromeClient = object : WebChromeClient() {
@@ -207,6 +295,19 @@ class MainActivity : ComponentActivity() {
                     pendingGeoOrigin = origin
                     locationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
                 }
+            }
+
+            override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
+                // JS warnings/errors are invisible on a phone; keep the most
+                // recent ones so the crash screen can show what the page was
+                // doing right before things went wrong.
+                if (msg.messageLevel() == ConsoleMessage.MessageLevel.ERROR ||
+                    msg.messageLevel() == ConsoleMessage.MessageLevel.WARNING
+                ) {
+                    val where = msg.sourceId()?.let { "$it:${msg.lineNumber()}" } ?: "?"
+                    logConsole("${msg.messageLevel()}: ${msg.message()}  ($where)")
+                }
+                return false
             }
         }
 
@@ -249,6 +350,10 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        webReady = true
+        // Marker: if the next thing that happens is the process vanishing, this
+        // file is still on disk at the next launch and we know it died silently.
+        runCatching { sessionFile().writeText(System.currentTimeMillis().toString()) }
         web.loadUrl(HOME_URL)
         web.requestApplyInsets()
     }
@@ -256,19 +361,27 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (!webReady) return
         // Started again from the home gesture / app icon: bounce the UI home.
         pushEvent("home", null)
     }
 
     override fun onResume() {
         super.onResume()
+        if (!webReady) return
+        runCatching { sessionFile().writeText(System.currentTimeMillis().toString()) }
         web.onResume()
         pushEvent("resume", null)
     }
 
     override fun onPause() {
         super.onPause()
-        web.onPause()
+        if (webReady) {
+            // Cleanly leaving the foreground clears the marker; a crash while
+            // foregrounded does not, which is exactly the signal we want.
+            runCatching { sessionFile().delete() }
+            web.onPause()
+        }
     }
 
     override fun onDestroy() {
@@ -628,10 +741,147 @@ class MainActivity : ComponentActivity() {
     }
 
     /* ------------------------------------------------------------------ *
+     *  Crash surface                                                     *
+     * ------------------------------------------------------------------ */
+
+    private fun crashFile(): File = File(filesDir, CRASH_FILE)
+
+    /** Written while AURA is foregrounded; its presence at launch means a silent death. */
+    private fun sessionFile(): File = File(filesDir, SESSION_FILE)
+
+    /** The last recorded failure, with its device summary, or null if there is none. */
+    private fun readCrash(): String? {
+        val f = crashFile()
+        if (!f.exists()) return null
+        return runCatching { f.readText() }.getOrNull()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun clearCrash() {
+        runCatching { crashFile().delete() }
+        runCatching { File(filesDir, CONSOLE_FILE).delete() }
+        runCatching { sessionFile().delete() }
+    }
+
+    private fun writeCrashText(text: String) {
+        runCatching { crashFile().writeText(text + "\n\n" + deviceSummary()) }
+    }
+
+    private fun writeCrash(t: Throwable) {
+        val sw = StringWriter()
+        t.printStackTrace(PrintWriter(sw))
+        writeCrashText("AURA failed to start\n\n" + sw.toString())
+    }
+
+    private fun deviceSummary(): String = buildString {
+        append("--- device ---\n")
+        append("android ").append(Build.VERSION.RELEASE)
+        append(" (sdk ").append(Build.VERSION.SDK_INT).append(")\n")
+        append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n')
+        append("app ").append(appVersion()).append('\n')
+    }
+
+    private fun appVersion(): String = runCatching {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    }.getOrDefault("?")
+
+    /** Append a JS warning/error to the per-run console log, capped so it can't grow forever. */
+    private fun logConsole(line: String) {
+        io.execute {
+            runCatching {
+                val f = File(filesDir, CONSOLE_FILE)
+                if (f.length() > 128 * 1024) f.writeText("")
+                f.appendText(line + "\n")
+            }
+        }
+    }
+
+    private fun showDiagnostics(head: String, includeConsole: Boolean) {
+        val logText = buildString {
+            append(head)
+            if (includeConsole) {
+                val f = File(filesDir, CONSOLE_FILE)
+                if (f.exists()) {
+                    val tail = runCatching { f.readText().takeLast(4096) }.getOrNull()
+                    if (!tail.isNullOrBlank()) {
+                        append("\n\n--- page console ---\n").append(tail)
+                    }
+                }
+            }
+        }
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#FF070C22"))
+            setPadding(pad, pad, pad, pad)
+        }
+
+        root.addView(TextView(this).apply {
+            text = "AURA hit a problem"
+            setTextColor(Color.parseColor("#FFFFFFFF"))
+            textSize = 18f
+        })
+        root.addView(TextView(this).apply {
+            text = "Tap Copy (or screenshot this), send it to your assistant, then Retry."
+            setTextColor(Color.parseColor("#99E9ECFF"))
+            textSize = 12f
+            setPadding(0, pad / 2, 0, pad / 2)
+        })
+        val body = TextView(this).apply {
+            text = logText
+            setTextColor(Color.parseColor("#FFD7DBFF"))
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+        }
+        root.addView(ScrollView(this).apply { addView(body) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val copy = Button(this).apply {
+            text = "Copy"
+            setOnClickListener {
+                runCatching {
+                    (this@MainActivity.getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
+                        .setPrimaryClip(ClipData.newPlainText("AURA log", logText))
+                }
+                text = "Copied"
+            }
+        }
+        val retry = Button(this).apply {
+            text = "Retry"
+            setOnClickListener {
+                clearCrash()
+                recreate()
+            }
+        }
+        val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        buttons.addView(copy, lp)
+        buttons.addView(
+            retry, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        root.addView(buttons)
+
+        val safe = Button(this).apply {
+            text = "Safe mode (GPU off)"
+            setOnClickListener {
+                prefs.edit().putBoolean(SAFE_ONCE, true).apply()
+                clearCrash()
+                recreate()
+            }
+        }
+        root.addView(safe)
+
+        setContentView(root)
+        webReady = false
+    }
+
+    /* ------------------------------------------------------------------ *
      *  Plumbing                                                          *
      * ------------------------------------------------------------------ */
 
-    /** Reads a string arg, treating JSON `null` (which org.json renders as "null") as absent. */
+    /**
+     * Reads a string arg, treating JSON `null` (which org.json renders as "null") as absent.
+     */
     private fun str(args: JSONObject, name: String): String {
         val v = args.optString(name, "")
         return if (v == "null") "" else v
@@ -647,12 +897,13 @@ class MainActivity : ComponentActivity() {
         JSONObject().put("ok", false).put("error", message)
 
     private fun respond(id: Int, obj: JSONObject) {
-        if (id <= 0) return
+        if (id <= 0 || !webReady) return
         val js = "window.__auraNativeResult($id, ${JSONObject.quote(obj.toString())});"
         web.post { web.evaluateJavascript(js, null) }
     }
 
     private fun pushEvent(name: String, data: JSONObject?) {
+        if (!webReady) return
         val payload = data?.toString() ?: "null"
         val js = "window.__auraNativeEvent&&window.__auraNativeEvent(" +
             "${JSONObject.quote(name)}, ${JSONObject.quote(payload)});"
@@ -660,6 +911,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun pushInsets() {
+        if (!webReady) return
         val js = "window.AURA&&window.AURA.setInsets&&window.AURA.setInsets({" +
             "top:$insetTop,bottom:$insetBottom,left:$insetLeft,right:$insetRight});"
         web.post { web.evaluateJavascript(js, null) }
@@ -696,6 +948,19 @@ class MainActivity : ComponentActivity() {
             "https://appassets.androidplatform.net/assets/index.html"
         private const val CACHE_URL =
             "https://appassets.androidplatform.net/cache/"
+
+        /** Stack trace from the previous run, surfaced on screen at next launch. */
+        private const val CRASH_FILE = "last-crash.txt"
+
+        /** JS warnings/errors from the current run, shown alongside a crash. */
+        private const val CONSOLE_FILE = "console.log"
+
+        /** Foreground marker: present at launch ⇒ the previous run died silently. */
+        private const val SESSION_FILE = "session.lock"
+
+        /** SharedPreferences store + the one-shot "GPU off" retry flag. */
+        private const val PREFS = "aura"
+        private const val SAFE_ONCE = "safeOnce"
 
         /** Some image hosts (Pinterest among them) reject requests without a UA. */
         private const val USER_AGENT =

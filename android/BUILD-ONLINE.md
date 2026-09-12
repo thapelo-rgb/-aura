@@ -93,6 +93,26 @@ Press the home gesture and AURA is now your launcher.
 
 ---
 
+## If it crashes when you open it
+
+From version **0.3.1** the app has a built-in crash screen. If AURA dies, the next
+time you open it you'll see **"AURA hit a problem"** with the exact reason (a stack
+trace, your device/Android version, and the last few JavaScript errors) plus
+**Copy** and **Retry** buttons.
+
+- Tap **Copy** (or screenshot the screen) and send that text on — it says precisely
+  what went wrong and where.
+- **Retry** clears the log and starts the app normally again.
+- If the text says AURA "closed without reporting an error", that means the process
+  died natively (usually the graphics driver). Tap **Safe mode (GPU off)** to retry
+  with hardware acceleration switched off for that one launch.
+- If it isn't crashing, you never see this screen.
+
+If the app closes with *no* crash screen at all, that means the whole process died
+natively (usually the graphics driver). Say so — that's a different, narrower problem.
+
+---
+
 ## Updating later
 
 Push any change to the repo and a new APK builds automatically — same download steps.

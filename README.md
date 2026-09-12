@@ -13,7 +13,7 @@ Ships two ways from **one source of truth**:
    `https://appassets.androidplatform.net/` (so sensors, geolocation, vibration,
    IndexedDB and WebGL all count as a secure context).
 
-Version `0.3.0`. Targets **Android 13–15** (minSdk 24, compileSdk/targetSdk 35).
+Version `0.3.1`. Targets **Android 13–15** (minSdk 24, compileSdk/targetSdk 35).
 
 ## Layout
 
@@ -44,6 +44,7 @@ src/android/        ← READY-TO-BUILD Gradle project
   app/build.gradle                 AGP 8.7.3, Kotlin 1.9.24, minSdk 24, compileSdk/targetSdk 35
   app/src/main/AndroidManifest.xml  HOME + LAUNCHER intent filters, <queries>, SET_WALLPAPER…
   app/src/main/java/dev/aura/app/MainActivity.kt   WebViewAssetLoader shell + AuraNative bridge
+  app/src/main/java/dev/aura/app/AuraApp.kt        uncaught-exception recorder (feeds the crash screen)
   app/src/main/res/{values,mipmap-*}/…             theme, strings, launcher icons
   WALLPAPERS.md                    the pack: zip URLs + rebuild recipe
   BUILD-ONLINE.md                  build the APK with GitHub Actions only (no Android Studio)
