@@ -126,19 +126,16 @@ class MainActivity : ComponentActivity() {
             onPicked(uris)
         }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    override fun onCreate(savedInstanceState: Bundle?) {
+       override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
 
-    // --- FIX FOR CACHE DIRECTORY CRASH ---
-    // Get the app's private cache directory and create it if it doesn't exist
-    val cacheDir = cacheDir
-    if (!cacheDir.exists()) {
-        cacheDir.mkdirs()
-    }
-    // --- END OF FIX ---
+        // --- FIX FOR CACHE DIRECTORY CRASH ---
+        // Get the app's private cache directory and create it if it doesn't exist
+        val appCacheDir = cacheDir
+        if (appCacheDir != null && !appCacheDir.exists()) {
+            appCacheDir.mkdirs()
+        }
+        // --- END OF FIX ---
 
     setContentView(R.layout.activity_main)
     // ... rest of your existing code ...
