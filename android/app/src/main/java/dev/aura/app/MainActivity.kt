@@ -129,7 +129,20 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
 
+    // --- FIX FOR CACHE DIRECTORY CRASH ---
+    // Get the app's private cache directory and create it if it doesn't exist
+    val cacheDir = cacheDir
+    if (!cacheDir.exists()) {
+        cacheDir.mkdirs()
+    }
+    // --- END OF FIX ---
+
+    setContentView(R.layout.activity_main)
+    // ... rest of your existing code ...
+}
         // If the previous run died, show why instead of closing silently. A phone
         // gives no other channel, so this screen is the whole diagnosis loop.
         readCrash()?.let {
